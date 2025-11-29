@@ -2,45 +2,48 @@
 import React, { useMemo, useState } from "react";
 import "./index.css";
 
-/**
- * FCFS (non-preemptive) computation.
- * - Stable order by arrival time, then input order.
- * - CPU may be idle if next arrival > current time.
- * - start  = max(currentTime, arrival)
- * - completion = start + burst
- * - waiting = start - arrival
- * - turnaround = completion - arrival
- */
-function computeFCFS(processes) {
-  const parsed = processes
-    .map((p, i) => ({
-      ...p,
-      _i: i,
-      arrival: Number(p.arrival),
-      burst: Number(p.burst),
-    }))
-    .filter(p => !Number.isNaN(p.arrival) && !Number.isNaN(p.burst) && p.burst > 0 && p.arrival >= 0);
+// Helper to normalize and validate processes
+function normalizeProcesses(list) {
+  const result = [];
+  list.forEach((p, index) => {
+    const pid = (p.pid ?? "").trim();
+    const arrival = Number(p.arrival);
+    const burst = Number(p.burst);
+    if (!pid) return;
+    if (!Number.isFinite(arrival) || !Number.isFinite(burst)) return;
+    if (burst <= 0) return;
+    result.push({ pid, arrival, burst, index });
+  });
+  return result;
+}
 
-  // Stable sort: arrival asc, then input index
-  parsed.sort((a, b) => a.arrival - b.arrival || a._i - b._i);
+// FCFS (non-preemptive) with arrival times and idle periods
+function computeFCFS(list) {
+  const ps = normalizeProcesses(list).sort((a, b) =>
+    a.arrival !== b.arrival ? a.arrival - b.arrival : a.index - b.index
+  );
 
   let t = 0;
   const rows = [];
   const timeline = [];
 
-  for (const p of parsed) {
-    // CPU idle gap
-    if (t < p.arrival) {
+  const pushIdle = (from, to) => {
+    if (to > from) {
       timeline.push({
         pid: "IDLE",
-        start: t,
-        end: p.arrival,
-        duration: p.arrival - t,
+        start: from,
+        end: to,
+        duration: to - from,
         idle: true,
       });
+    }
+  };
+
+  for (const p of ps) {
+    if (t < p.arrival) {
+      pushIdle(t, p.arrival);
       t = p.arrival;
     }
-
     const start = t;
     const completion = start + p.burst;
     const waiting = start - p.arrival;
@@ -67,11 +70,127 @@ function computeFCFS(processes) {
     t = completion;
   }
 
-  const n = rows.length || 1;
-  const avgWaiting = rows.reduce((s, r) => s + r.waiting, 0) / n;
-  const avgTurnaround = rows.reduce((s, r) => s + r.turnaround, 0) / n;
+  let sw = 0;
+  let st = 0;
+  for (const r of rows) {
+    sw += r.waiting;
+    st += r.turnaround;
+  }
 
-  const makespan = timeline.length ? timeline[timeline.length - 1].end - timeline[0].start : 0;
+  const n = rows.length || 1;
+  const avgWaiting = sw / n;
+  const avgTurnaround = st / n;
+  const makespan = timeline.length
+    ? timeline[timeline.length - 1].end - timeline[0].start
+    : 0;
+
+  return { rows, avgWaiting, avgTurnaround, timeline, makespan };
+}
+
+// SJF (non-preemptive) with arrival times
+function computeSJF(list) {
+  const base = normalizeProcesses(list);
+
+  const remaining = base
+    .slice()
+    .sort((a, b) =>
+      a.arrival !== b.arrival ? a.arrival - b.arrival : a.index - b.index
+    );
+
+  const ready = [];
+  const rows = [];
+  const timeline = [];
+  let t = 0;
+
+  const pushIdle = (from, to) => {
+    if (to > from) {
+      timeline.push({
+        pid: "IDLE",
+        start: from,
+        end: to,
+        duration: to - from,
+        idle: true,
+      });
+    }
+  };
+
+  const bringArrivals = () => {
+    while (remaining.length > 0 && remaining[0].arrival <= t) {
+      ready.push(remaining.shift());
+    }
+  };
+
+  while (remaining.length > 0 || ready.length > 0) {
+    bringArrivals();
+
+    if (ready.length === 0) {
+      const nextArrival = remaining[0].arrival;
+      pushIdle(t, nextArrival);
+      t = nextArrival;
+      bringArrivals();
+      if (ready.length === 0) continue;
+    }
+
+    // choose shortest job; ties by arrival then original index
+    let best = 0;
+    for (let i = 1; i < ready.length; i++) {
+      const a = ready[i];
+      const b = ready[best];
+      if (
+        a.burst < b.burst ||
+        (a.burst === b.burst &&
+          (a.arrival < b.arrival ||
+            (a.arrival === b.arrival && a.index < b.index)))
+      ) {
+        best = i;
+      }
+    }
+
+    const p = ready.splice(best, 1)[0];
+
+    const start = Math.max(t, p.arrival);
+    if (t < start) {
+      pushIdle(t, start);
+    }
+
+    const completion = start + p.burst;
+    const waiting = start - p.arrival;
+    const turnaround = completion - p.arrival;
+
+    rows.push({
+      pid: p.pid,
+      arrival: p.arrival,
+      burst: p.burst,
+      start,
+      completion,
+      waiting,
+      turnaround,
+    });
+
+    timeline.push({
+      pid: p.pid,
+      start,
+      end: completion,
+      duration: p.burst,
+      idle: false,
+    });
+
+    t = completion;
+  }
+
+  let sw = 0;
+  let st = 0;
+  for (const r of rows) {
+    sw += r.waiting;
+    st += r.turnaround;
+  }
+
+  const n = rows.length || 1;
+  const avgWaiting = sw / n;
+  const avgTurnaround = st / n;
+  const makespan = timeline.length
+    ? timeline[timeline.length - 1].end - timeline[0].start
+    : 0;
 
   return { rows, avgWaiting, avgTurnaround, timeline, makespan };
 }
@@ -83,57 +202,91 @@ export default function App() {
     { pid: "P3", arrival: 4, burst: 4 },
   ]);
 
+  const [algo, setAlgo] = useState("FCFS");
+
   const { rows, avgWaiting, avgTurnaround, timeline, makespan } = useMemo(
-    () => computeFCFS(processes),
-    [processes]
+    () => (algo === "FCFS" ? computeFCFS(processes) : computeSJF(processes)),
+    [processes, algo]
   );
 
-  const handleChange = (idx, field, value) => {
-    setProcesses(prev => {
-      const next = [...prev];
-      if (field === "pid") next[idx].pid = value;
-      else next[idx][field] = value === "" ? "" : Number(value);
-      return next;
-    });
+  const changeText = (i, e) => {
+    const next = processes.slice();
+    next[i].pid = e.target.value;
+    setProcesses(next);
   };
 
-  const addRow = () => {
-    const nextIndex = processes.length + 1;
-    setProcesses(prev => [...prev, { pid: `P${nextIndex}`, arrival: 0, burst: 1 }]);
+  const changeNum = (i, field, e) => {
+    const next = processes.slice();
+    const v = e.target.value;
+    next[i][field] = v === "" ? "" : Number(v);
+    setProcesses(next);
   };
 
-  const removeRow = (idx) => {
-    setProcesses(prev => prev.filter((_, i) => i !== idx));
-  };
+  const addRow = () =>
+    setProcesses((p) =>
+      p.concat({
+        pid: "P" + (p.length + 1),
+        arrival: 0,
+        burst: 1,
+      })
+    );
 
-  const loadSample = () => {
+  const removeRow = (i) =>
+    setProcesses((p) => p.filter((_, index) => index !== i));
+
+  const loadSample = () =>
     setProcesses([
       { pid: "P1", arrival: 0, burst: 3 },
       { pid: "P2", arrival: 2, burst: 6 },
       { pid: "P3", arrival: 4, burst: 4 },
       { pid: "P4", arrival: 6, burst: 5 },
     ]);
-  };
-
-  const clearAll = () => setProcesses([{ pid: "P1", arrival: 0, burst: 1 }]);
 
   return (
     <div className="page">
       <header className="header">
-        <h1>FCFS (Non-Preemptive) Scheduler</h1>
+        <h1>{algo} (Non-Preemptive) Scheduler</h1>
         <p className="muted">
-          Enter processes (PID, Arrival Time, Burst Time). FCFS schedules by earliest arrival; ties keep input order.
+          Enter PID, Arrival, Burst.{" "}
+          {algo === "FCFS"
+            ? "FCFS runs by earliest arrival; no preemption."
+            : "SJF runs the ready process with the shortest burst time; ties use FCFS; non-preemptive."}
         </p>
+        <div className="algo-toggle">
+          <span className="algo-label">Algorithm:</span>
+          <label>
+            <input
+              type="radio"
+              name="algo"
+              value="FCFS"
+              checked={algo === "FCFS"}
+              onChange={() => setAlgo("FCFS")}
+            />
+            FCFS
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="algo"
+              value="SJF"
+              checked={algo === "SJF"}
+              onChange={() => setAlgo("SJF")}
+            />
+            SJF
+          </label>
+        </div>
       </header>
 
-      {/* Input Table */}
       <section className="card">
         <div className="card-head">
           <h2>Input</h2>
           <div className="actions">
-            <button className="btn" onClick={addRow}>+ Add Process</button>
-            <button className="btn ghost" onClick={loadSample}>Load Sample</button>
-            <button className="btn danger ghost" onClick={clearAll}>Clear</button>
+            <button className="btn" onClick={addRow}>
+              + Add
+            </button>
+            <button className="btn ghost" onClick={loadSample}>
+              Load Sample
+            </button>
           </div>
         </div>
         <div className="table-wrap">
@@ -147,14 +300,20 @@ export default function App() {
               </tr>
             </thead>
             <tbody>
+              {processes.length === 0 && (
+                <tr>
+                  <td colSpan="4" className="muted">
+                    No processes.
+                  </td>
+                </tr>
+              )}
               {processes.map((p, i) => (
                 <tr key={i}>
                   <td>
                     <input
                       className="input"
                       value={p.pid}
-                      onChange={(e) => handleChange(i, "pid", e.target.value)}
-                      placeholder="P1"
+                      onChange={(e) => changeText(i, e)}
                     />
                   </td>
                   <td>
@@ -162,9 +321,8 @@ export default function App() {
                       className="input"
                       type="number"
                       min="0"
-                      step="1"
                       value={p.arrival}
-                      onChange={(e) => handleChange(i, "arrival", e.target.value)}
+                      onChange={(e) => changeNum(i, "arrival", e)}
                     />
                   </td>
                   <td>
@@ -172,25 +330,25 @@ export default function App() {
                       className="input"
                       type="number"
                       min="1"
-                      step="1"
                       value={p.burst}
-                      onChange={(e) => handleChange(i, "burst", e.target.value)}
+                      onChange={(e) => changeNum(i, "burst", e)}
                     />
                   </td>
                   <td className="cell-right">
-                    <button className="btn danger" onClick={() => removeRow(i)}>Delete</button>
+                    <button
+                      className="btn danger"
+                      onClick={() => removeRow(i)}
+                    >
+                      Delete
+                    </button>
                   </td>
                 </tr>
               ))}
-              {!processes.length && (
-                <tr><td colSpan="4" className="muted">No processes. Add one.</td></tr>
-              )}
             </tbody>
           </table>
         </div>
       </section>
 
-      {/* Results */}
       <section className="grid">
         <div className="card">
           <div className="card-head">
@@ -210,6 +368,13 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan="7" className="muted">
+                      No valid rows.
+                    </td>
+                  </tr>
+                )}
                 {rows.map((r, i) => (
                   <tr key={i}>
                     <td>{r.pid}</td>
@@ -221,19 +386,24 @@ export default function App() {
                     <td>{r.turnaround}</td>
                   </tr>
                 ))}
-                {!rows.length && (
-                  <tr><td colSpan="7" className="muted">No valid rows to compute.</td></tr>
-                )}
               </tbody>
               {rows.length > 0 && (
                 <tfoot>
                   <tr>
-                    <td colSpan="5" className="cell-right"><strong>Average Waiting</strong></td>
-                    <td colSpan="2"><strong>{avgWaiting.toFixed(2)}</strong></td>
+                    <td colSpan="5" className="cell-right">
+                      <strong>Average waiting time</strong>
+                    </td>
+                    <td colSpan="2">
+                      <strong>{avgWaiting.toFixed(2)}</strong>
+                    </td>
                   </tr>
                   <tr>
-                    <td colSpan="5" className="cell-right"><strong>Average Turnaround</strong></td>
-                    <td colSpan="2"><strong>{avgTurnaround.toFixed(2)}</strong></td>
+                    <td colSpan="5" className="cell-right">
+                      <strong>Average turnaround time</strong>
+                    </td>
+                    <td colSpan="2">
+                      <strong>{avgTurnaround.toFixed(2)}</strong>
+                    </td>
                   </tr>
                 </tfoot>
               )}
@@ -241,30 +411,62 @@ export default function App() {
           </div>
         </div>
 
-        {/* Gantt-like Timeline */}
         <div className="card">
           <div className="card-head">
             <h2>Timeline (Gantt)</h2>
           </div>
           <div className="gantt">
-            {timeline.length === 0 && <div className="muted">No timeline to show.</div>}
+            {timeline.length === 0 && (
+              <div className="muted">No timeline to show.</div>
+            )}
             {timeline.length > 0 && (
-              <div className="gantt-bar">
-                {timeline.map((b, i) => {
-                  const widthPct = makespan > 0 ? (b.duration / makespan) * 100 : 0;
-                  return (
-                    <div
-                      key={i}
-                      className={`block ${b.idle ? "idle" : ""}`}
-                      style={{ width: `${widthPct}%` }}
-                      title={`${b.pid}: ${b.start} → ${b.end} (${b.duration})`}
-                    >
-                      <span className="block-label">{b.pid}</span>
-                      <span className="block-time">{b.start}</span>
-                      <span className="block-time right">{b.end}</span>
-                    </div>
-                  );
-                })}
+              <div className="gantt-inner">
+                <div className="gantt-bar">
+                  {timeline.map((b, i) => {
+                    const w =
+                      makespan > 0 ? (b.duration / makespan) * 100 : 0;
+                    const isFirst = i === 0;
+                    const isLast = i === timeline.length - 1;
+                    const showLeft = isFirst; // only first block shows left tick
+                    const showRight = true; // every block shows right tick
+
+                    return (
+                      <div
+                        key={i}
+                        className={
+                          "block " +
+                          (b.idle ? "idle " : "") +
+                          (isFirst ? "first " : "") +
+                          (isLast ? "last " : "")
+                        }
+                        style={{ width: w + "%" }}
+                        title={`${b.pid}: ${b.start} \u2192 ${b.end} (${b.duration})`}
+                      >
+                        <span className="block-label">{b.pid}</span>
+                        {showLeft && (
+                          <span className="block-time left">
+                            {b.start}
+                          </span>
+                        )}
+                        {showRight && (
+                          <span className="block-time right">
+                            {b.end}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="gantt-legend">
+                  <div className="legend-item">
+                    <span className="legend-box running"></span>
+                    <span>Running</span>
+                  </div>
+                  <div className="legend-item">
+                    <span className="legend-box idle-box"></span>
+                    <span>Idle</span>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -273,7 +475,7 @@ export default function App() {
 
       <footer className="footer muted">
         <p>
-          FCFS is <em>non-preemptive</em>: a running process is never interrupted by arrivals.
+          {algo} is <em>non-preemptive</em>: once running, a process finishes.
         </p>
       </footer>
     </div>
